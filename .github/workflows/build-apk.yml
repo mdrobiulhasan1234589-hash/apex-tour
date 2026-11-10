@@ -1,0 +1,241 @@
+name: Build APEX TOUR APK (signed release)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # UNZIP THE PROJECT (repo only needs project.zip + this workflow)
+      # Files you upload directly to the repo root (index.html, version.txt,
+      # logo_url.txt, app_logo.png ...) OVERRIDE the same files inside the zip.
+      # ==========================================
+      - name: Unzip project
+        run: |
+          ZIP=$(ls -1 *.zip 2>/dev/null | head -1)
+          if [ -z "$ZIP" ]; then
+            if [ -f version.txt ] && [ -f index.html ]; then echo "No zip found, using files already in repo"; exit 0; fi
+            echo "❌ No .zip file found in the repo root. Upload project.zip first."; exit 1
+          fi
+          echo "Using $ZIP"
+          rm -rf /tmp/proj && mkdir -p /tmp/proj
+          unzip -q "$ZIP" -d /tmp/proj
+          SRC=$(dirname "$(find /tmp/proj -name version.txt -not -path '*/node_modules/*' | head -1)")
+          if [ ! -d "$SRC" ] || [ ! -f "$SRC/index.html" ]; then echo "❌ index.html / version.txt not found inside the zip"; exit 1; fi
+          cp -an "$SRC"/. .
+          echo "Project files:"; ls -la
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # ==========================================
+      # CHECK SECRETS (signing key)
+      # ==========================================
+      - name: Check signing secrets
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+          KSP: ${{ secrets.KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.KEY_ALIAS }}
+          KP: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for v in KS KSP KA KP; do
+            if [ -z "${!v}" ]; then
+              echo "❌ GitHub Secret missing. Add these 4 secrets: KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD"
+              echo "   (Repo > Settings > Secrets and variables > Actions > New repository secret)"
+              exit 1
+            fi
+          done
+          echo "✅ All 4 signing secrets found"
+
+      # ==========================================
+      # VERSION (single source: version.txt)
+      # ==========================================
+      - name: Read version
+        run: |
+          VERSION=$(tr -d ' \r\n' < version.txt)
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "❌ version.txt must look like 1.0.1"; exit 1 ;;
+          esac
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$CODE" >> "$GITHUB_ENV"
+          echo "Version: v$VERSION  (versionCode $CODE)"
+
+      # ==========================================
+      # LOGO  (app_logo.png/jpg in repo wins, otherwise logo_url.txt)
+      # ==========================================
+      - name: Prepare app logo
+        run: |
+          if ! command -v convert >/dev/null 2>&1 && ! command -v magick >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y imagemagick
+          fi
+          IM="convert"; command -v convert >/dev/null 2>&1 || IM="magick"
+
+          SRC=""
+          for f in app_logo.png app_logo.jpg app_logo.jpeg; do
+            if [ -f "$f" ]; then SRC="$f"; break; fi
+          done
+          if [ -z "$SRC" ]; then
+            URL=$(tr -d ' \r\n' < logo_url.txt)
+            echo "Downloading logo from $URL"
+            curl -fsSL --retry 3 -A "Mozilla/5.0" "$URL" -o /tmp/logo_src
+            SRC=/tmp/logo_src
+          fi
+
+          $IM "$SRC" -resize 512x512 -background black -gravity center -extent 512x512 PNG32:tla_tour_logo.png
+          ls -la tla_tour_logo.png
+          file tla_tour_logo.png
+
+      # ==========================================
+      # BUILD WEB APP (version inject + obfuscation)
+      # ==========================================
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build web app (obfuscated)
+        run: npm run build
+
+      # ==========================================
+      # ANDROID PROJECT
+      # ==========================================
+      - name: Backup google-services.json
+        env:
+          GSJ: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          mkdir -p android/app
+          if [ -n "$GSJ" ]; then
+            echo "$GSJ" > /tmp/google-services.json
+            echo "Using google-services.json from GitHub Secret"
+          elif [ -f "android/app/google-services.json" ]; then
+            cp android/app/google-services.json /tmp/google-services.json
+            echo "Using google-services.json from repo"
+          else
+            echo "❌ google-services.json not found (repo android/app/ or secret GOOGLE_SERVICES_JSON)"
+            exit 1
+          fi
+
+      - name: Remove old android folder
+        run: rm -rf android
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Restore google-services.json
+        run: |
+          mkdir -p android/app
+          cp /tmp/google-services.json android/app/google-services.json
+          grep '"project_id"' android/app/google-services.json || echo "WARNING: no project_id found"
+
+      - name: Add Firebase + google-services plugin
+        run: python3 scripts/patch_firebase.py
+
+      - name: Disable native launch splash
+        run: |
+          mkdir -p android/app/src/main/res/drawable
+          cp native/transparent_splash_icon.xml android/app/src/main/res/drawable/transparent_splash_icon.xml
+          python3 scripts/patch_splash.py
+
+      # ==========================================
+      # NATIVE CODE: installer, provider, anti-tamper
+      # ==========================================
+      - name: Decode keystore
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KS" | base64 -d > android/app/release.jks
+          ls -la android/app/release.jks
+
+      - name: Copy native files + arm signature guard
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          JAVA_DIR=android/app/src/main/java/com/artourbd/app
+          mkdir -p "$JAVA_DIR" android/app/src/main/res/xml
+          cp native/MainActivity.java native/ApkInstaller.java native/ApkFileProvider.java "$JAVA_DIR/"
+          cp native/apk_paths.xml android/app/src/main/res/xml/apk_paths.xml
+
+          HASH=$(keytool -list -v -keystore android/app/release.jks -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" \
+                  | grep -m1 "SHA256:" | sed 's/.*SHA256: *//' | tr -d ':' | tr 'A-F' 'a-f')
+          if [ ${#HASH} -ne 64 ]; then echo "❌ Could not read certificate hash"; exit 1; fi
+          sed -i "s/__CERT_SHA256__/$HASH/" "$JAVA_DIR/MainActivity.java"
+          echo "Signature guard armed (cert sha256 ${HASH:0:12}...)"
+
+          cat native/proguard-extra.pro >> android/app/proguard-rules.pro
+
+      - name: Patch manifest (permissions, provider, hardening)
+        run: python3 scripts/patch_manifest.py
+
+      - name: Set launcher icon
+        run: |
+          mkdir -p android/app/src/main/res/drawable
+          cp tla_tour_logo.png android/app/src/main/res/drawable/app_icon.png
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          s = s.replace('android:icon="@mipmap/ic_launcher"', 'android:icon="@drawable/app_icon"')
+          s = s.replace('android:roundIcon="@mipmap/ic_launcher_round"', 'android:roundIcon="@drawable/app_icon"')
+          p.write_text(s)
+          PY
+
+      - name: Patch gradle (signing, version, R8)
+        run: python3 scripts/patch_gradle.py
+
+      # ==========================================
+      # BUILD SIGNED RELEASE APK
+      # ==========================================
+      - name: Build release APK
+        working-directory: android
+        env:
+          KEYSTORE_FILE: release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Verify signature
+        continue-on-error: true
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | head -20
+          aapt_out=$(ls "$ANDROID_HOME"/build-tools/*/aapt | sort -V | tail -1)
+          "$aapt_out" dump badging "$APK" | grep -E "package:|application-label:" | head -3
+
+      - name: Rename APK
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          mkdir -p out
+          cp "$APK" "out/APEX-TOUR-v${APP_VERSION}.apk"
+          ls -la out
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: APEX-TOUR-APK-v${{ env.APP_VERSION }}
+          path: out/APEX-TOUR-v${{ env.APP_VERSION }}.apk
