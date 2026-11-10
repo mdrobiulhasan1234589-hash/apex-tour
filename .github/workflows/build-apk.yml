@@ -8,17 +8,15 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ==========================================
       # UNZIP THE PROJECT (repo only needs project.zip + this workflow)
       # Files you upload directly to the repo root (index.html, version.txt,
       # logo_url.txt, app_logo.png ...) OVERRIDE the same files inside the zip.
-      # ==========================================
       - name: Unzip project
         run: |
           ZIP=$(ls -1 *.zip 2>/dev/null | head -1)
@@ -45,9 +43,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # ==========================================
       # CHECK SECRETS (signing key)
-      # ==========================================
       - name: Check signing secrets
         env:
           KS: ${{ secrets.KEYSTORE_BASE64 }}
@@ -64,9 +60,7 @@ jobs:
           done
           echo "✅ All 4 signing secrets found"
 
-      # ==========================================
       # VERSION (single source: version.txt)
-      # ==========================================
       - name: Read version
         run: |
           VERSION=$(tr -d ' \r\n' < version.txt)
@@ -82,9 +76,7 @@ jobs:
           echo "VERSION_CODE=$CODE" >> "$GITHUB_ENV"
           echo "Version: v$VERSION  (versionCode $CODE)"
 
-      # ==========================================
       # LOGO  (app_logo.png/jpg in repo wins, otherwise logo_url.txt)
-      # ==========================================
       - name: Prepare app logo
         run: |
           if ! command -v convert >/dev/null 2>&1 && ! command -v magick >/dev/null 2>&1; then
@@ -107,18 +99,14 @@ jobs:
           ls -la tla_tour_logo.png
           file tla_tour_logo.png
 
-      # ==========================================
       # BUILD WEB APP (version inject + obfuscation)
-      # ==========================================
       - name: Install dependencies
         run: npm install
 
       - name: Build web app (obfuscated)
         run: npm run build
 
-      # ==========================================
       # ANDROID PROJECT
-      # ==========================================
       - name: Backup google-services.json
         env:
           GSJ: ${{ secrets.GOOGLE_SERVICES_JSON }}
@@ -159,9 +147,7 @@ jobs:
           cp native/transparent_splash_icon.xml android/app/src/main/res/drawable/transparent_splash_icon.xml
           python3 scripts/patch_splash.py
 
-      # ==========================================
       # NATIVE CODE: installer, provider, anti-tamper
-      # ==========================================
       - name: Decode keystore
         env:
           KS: ${{ secrets.KEYSTORE_BASE64 }}
@@ -206,9 +192,7 @@ jobs:
       - name: Patch gradle (signing, version, R8)
         run: python3 scripts/patch_gradle.py
 
-      # ==========================================
       # BUILD SIGNED RELEASE APK
-      # ==========================================
       - name: Build release APK
         working-directory: android
         env:
