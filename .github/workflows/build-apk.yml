@@ -1,24 +1,23 @@
-name: APEX TOUR APK BUILDER
+
+name: Build APEX TOUR APK
 
 on:
   push:
     branches:
       - main
       - master
-    paths-ignore:
-      - '*.md'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-apk:
-    name: Build APEX TOUR APK
+  build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Project
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -26,22 +25,24 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup Java
+      - name: Setup Java JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
-      - name: Install Project Dependencies
+      - name: Install Dependencies
         run: npm install
 
       - name: Build APK
         run: npm run build
 
-      - name: Find APK
+      - name: Locate APK
         run: |
           find . -type f -name "*.apk" -print
 
