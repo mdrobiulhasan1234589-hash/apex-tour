@@ -1,0 +1,54 @@
+name: APEX TOUR APK BUILDER
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build APEX TOUR APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Project
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Project Dependencies
+        run: npm install
+
+      - name: Build APK
+        run: npm run build
+
+      - name: Find APK
+        run: |
+          find . -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: APEX-TOUR-APK
+          path: '**/*.apk'
+          if-no-files-found: error
+          retention-days: 30
